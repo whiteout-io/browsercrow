@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8"/>
+        <title>Browsercrow</title>
+    </head>
+    <body>
+        <div>
+            <form id="client-input-form">
+                <input type="text" id="client-input-data" autofocus style="width: 700px;" placeholder="A1 LOGIN &quot;testuser&quot; &quot;demo&quot;"> <input type="submit" value="Send"/>
+            </form>
+        </div>
+        <div>IMAP 4rev1 server in a browser. Username is <code>testuser</code> and password is <code>demo</code></div>
+        <div><textarea readonly id="log" style="width: 800px; height: 400px;"></textarea></div>
+
+        <script src="../node_modules/utf7/src/utf7.js"></script>
+
+        <script src="../node_modules/imap-handler/src/imap-formal-syntax.js"></script>
+        <script src="../node_modules/imap-handler/src/imap-parser.js"></script>
+        <script src="../node_modules/imap-handler/src/imap-compiler.js"></script>
+        <script src="../node_modules/imap-handler/src/imap-handler.js"></script>
+
+        <script src="../node_modules/mimefuncs/node_modules/stringencoding/dist/stringencoding.js"></script>
+        <script src="../node_modules/mimefuncs/src/mimefuncs.js"></script>
+
+        <script src="../node_modules/addressparser/src/addressparser.js"></script>
+
+        <script src="../src/envelope.js"></script>
+        <script src="../src/mimeparser.js"></script>
+        <script src="../src/bodystructure.js"></script>
+
+        <script src="../src/browsercrow.js"></script>
+
+        <script src="client.js"></script>
+    </body>
+<html>
