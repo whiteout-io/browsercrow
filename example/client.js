@@ -2,11 +2,17 @@
 
 var server = new BrowserCrow({
     debug: false,
+    plugins: ['sasl-ir', 'xoauth2', 'special-use', 'id'],
+    id: {
+        name: 'browsercrow',
+        version: '0.1.0'
+    },
     storage: {
         'INBOX': {
             messages: [{
                 raw: 'Subject: hello 1\r\n\r\nWorld 1!',
-                internaldate: '14-Sep-2013 21:22:28 -0300'
+                internaldate: '14-Sep-2013 21:22:28 -0300',
+                uid: 500
             }, {
                 raw: 'Subject: hello 2\r\n\r\nWorld 2!',
                 flags: ['\\Seen']
@@ -64,6 +70,10 @@ var socket = server.connect();
 
 socket.onopen = function() {
     log('Connection', 'opened');
+
+    setInterval(function(){
+        server.appendMessage('INBOX', ['\\Seen'], '14-May-2014 21:22:28 -0300', 'Subject: test\r\n\r\nHello world!');
+    }, 25000);
 };
 
 socket.onclose = function() {

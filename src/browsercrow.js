@@ -14,14 +14,22 @@
     'use strict';
 
     function BrowserCrow(options) {
+        var _self = this;
+
         this.options = options || {};
 
         this.capabilities = [];
         this.outputHandlers = [];
         this.messageHandlers = [];
         this.fetchFilters = [];
+        this.pluginCommandHandlers = {};
+        this.storeFilters = [];
+        this.storeHandlers = {};
+        this.searchHandlers = {};
 
-        this.users = {
+        this.connections = [];
+
+        this.users = this.options.users || {
             testuser: {
                 password: 'demo',
                 xoauth2: {
@@ -40,6 +48,18 @@
         };
         this.uidnextCache = {}; // keep nextuid values if mailbox gets deleted
         this.folderCache = {};
+
+        [].concat(this.options.plugins || []).forEach(function(plugin) {
+            switch (typeof plugin) {
+                case 'string':
+                    _self.pluginHandlers[plugin.toUpperCase()](_self);
+                    break;
+                case 'function':
+                    plugin(_self);
+                    break;
+            }
+        });
+
         this.indexFolders();
     }
 
@@ -164,6 +184,31 @@
         };
     };
 
+    BrowserCrow.prototype.appendMessage = function(mailbox, flags, internaldate, raw, ignoreConnection) {
+        if (typeof mailbox === 'string') {
+            mailbox = this.getMailbox(mailbox);
+        }
+
+        var message = {
+            flags: flags,
+            internaldate: internaldate,
+            raw: raw
+        };
+
+        mailbox.messages.push(message);
+        this.processMessage(message, mailbox);
+
+        this.notify({
+            tag: '*',
+            attributes: [
+                mailbox.messages.length, {
+                    type: 'ATOM',
+                    value: 'EXISTS'
+                }
+            ]
+        }, mailbox, ignoreConnection);
+    };
+
     BrowserCrow.prototype.matchFolders = function(reference, match) {
         var _self = this;
         var includeINBOX = false;
@@ -282,6 +327,13 @@
         });
     };
 
+    BrowserCrow.prototype.validateInternalDate = function(date) {
+        if (!date || typeof date !== 'string') {
+            return false;
+        }
+        return !!date.match(/^([ \d]\d)\-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\-(\d{4}) (\d{2}):(\d{2}):(\d{2}) ([\-+])(\d{2})(\d{2})$/);
+    };
+
     BrowserCrow.prototype.formatInternalDate = function(date) {
         var day = date.getDate(),
             month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -309,6 +361,7 @@
         }
 
         var connection = new CrowConnection(this, options);
+        this.connections.push(connection);
 
         setTimeout(function() {
             connection._state = 'open';
@@ -321,6 +374,15 @@
         }, 15);
 
         return connection;
+    };
+
+    BrowserCrow.prototype._removeConnection = function(connection) {
+        for (var i = 0, len = this.connections.length; i < len; i++) {
+            if (this.connections[i] === connection) {
+                this.connections.splice(i, 1);
+                break;
+            }
+        }
     };
 
     BrowserCrow.prototype.getMessageRange = function(mailbox, range, isUid) {
@@ -372,9 +434,35 @@
         return result;
     };
 
+    BrowserCrow.prototype.registerCapability = function(keyword, handler) {
+        this.capabilities[keyword] = handler || function() {
+            return true;
+        };
+    };
+
+    BrowserCrow.prototype.setCommandHandler = function(command, handler) {
+        command = (command || '').toString().toUpperCase();
+        this.pluginCommandHandlers[command] = handler;
+    };
+
+
     BrowserCrow.prototype.getCommandHandler = function(command) {
         command = (command || '').toString().toUpperCase();
-        return this.commandHandlers[command] || false;
+        return this.pluginCommandHandlers[command] || this.commandHandlers[command] || false;
+    };
+
+    BrowserCrow.prototype.notify = function(command, mailbox, ignoreConnection) {
+        command.notification = true;
+        this.connections.forEach(function(connection) {
+            if (connection._state !== 'open') {
+                return;
+            }
+            connection.onNotify({
+                command: command,
+                mailbox: mailbox,
+                ignoreConnection: ignoreConnection
+            });
+        });
     };
 
     function CrowConnection(server, options) {
@@ -388,12 +476,29 @@
         this._commandQueue = [];
         this.notificationQueue = [];
         this._processing = false;
+        this.directNotifications = false;
 
         this.state = 'Not Authenticated';
 
         this.options.binaryType = this.options.binaryType || 'string';
         this._state = 'init';
     }
+
+    CrowConnection.prototype.onNotify = function(notification) {
+        if (notification.ignoreConnection === this) {
+            return;
+        }
+        if (!notification.mailbox ||
+            (this.selectedMailbox &&
+                this.selectedMailbox === (
+                    typeof notification.mailbox === 'string' &&
+                    this.getMailbox(notification.mailbox) || notification.mailbox))) {
+            this.notificationQueue.push(notification.command);
+            if (this.directNotifications) {
+                this.processNotifications();
+            }
+        }
+    };
 
     CrowConnection.prototype.onopen = function( /* evt */ ) {};
     CrowConnection.prototype.onerror = function( /* evt */ ) {
@@ -422,6 +527,7 @@
         }
         this._state = 'close';
         setTimeout(function() {
+            _self.server._removeConnection(_self);
             _self.onclose({
                 target: _self,
                 type: 'close',
@@ -461,6 +567,45 @@
                 data: data
             });
         }, 15);
+    };
+
+    CrowConnection.prototype.expungeDeleted = function(mailbox, ignoreSelf, ignoreExists) {
+        var deleted = 0,
+            // old copy is required for those sessions that run FETCH before
+            // displaying the EXPUNGE notice
+            mailboxCopy = [].concat(mailbox.messages);
+
+        for (var i = 0; i < mailbox.messages.length; i++) {
+            if (mailbox.messages[i].flags.indexOf('\\Deleted') >= 0) {
+                deleted++;
+                mailbox.messages[i].ghost = true;
+                mailbox.messages.splice(i, 1);
+                this.server.notify({
+                    tag: '*',
+                    attributes: [
+                        i + 1, {
+                            type: 'ATOM',
+                            value: 'EXPUNGE'
+                        }
+                    ]
+                }, mailbox, ignoreSelf ? this : false);
+                i--;
+            }
+        }
+
+        if (deleted) {
+            this.server.notify({
+                tag: '*',
+                attributes: [
+                    mailbox.messages.length, {
+                        type: 'ATOM',
+                        value: 'EXISTS'
+                    }
+                ],
+                // distribute the old mailbox data with the notification
+                mailboxCopy: mailboxCopy,
+            }, mailbox, ignoreSelf || ignoreExists ? this : false);
+        }
     };
 
     CrowConnection.prototype.processNotifications = function(data) {
@@ -1692,8 +1837,918 @@
                 }]
             }, 'FETCH', parsed, data);
             return callback();
+        },
+
+        NOOP: function(connection, parsed, data, callback) {
+            if (parsed.attributes) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'NOOP does not take any arguments'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'Completed'
+                }]
+            }, 'NOOP completed', parsed, data);
+
+            callback();
+        },
+
+        STORE: function(connection, parsed, data, callback) {
+            var storeHandlers = getStoreHandlers();
+
+            if (!parsed.attributes ||
+                parsed.attributes.length !== 3 ||
+                !parsed.attributes[0] ||
+                ['ATOM', 'SEQUENCE'].indexOf(parsed.attributes[0].type) < 0 ||
+                !parsed.attributes[1] ||
+                (['ATOM'].indexOf(parsed.attributes[1].type) < 0) ||
+                !parsed.attributes[2] ||
+                !(['ATOM', 'STRING'].indexOf(parsed.attributes[2].type) >= 0 || Array.isArray(parsed.attributes[2]))
+            ) {
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'STORE expects sequence set, item name and item value'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'STORE FAILED', parsed, data);
+                return callback();
+            }
+
+            // Respond with NO if pending response messages exist
+            try {
+                connection.notificationQueue.forEach(function(notification) {
+                    if (notification.attributes && (notification.attributes[1] || {}).value === 'EXPUNGE') {
+                        throw new Error('Pending EXPUNGE messages, can not store');
+                    }
+                });
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'NO',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'STORE FAILED', parsed, data);
+                return callback();
+            }
+
+            var messages = connection.selectedMailbox.messages;
+
+            for (var i = 0, len = connection.notificationQueue.length; i < len; i++) {
+                if (connection.notificationQueue[i].mailboxCopy) {
+                    messages = connection.notificationQueue[i].mailboxCopy;
+                    break;
+                }
+            }
+
+            var range = connection.server.getMessageRange(messages, parsed.attributes[0].value, false),
+                itemName = (parsed.attributes[1].value || '').toUpperCase(),
+                itemValue = [].concat(parsed.attributes[2] || []),
+                affected = [];
+
+            try {
+
+                itemValue.forEach(function(item, i) {
+                    if (!item || ['STRING', 'ATOM'].indexOf(item.type) < 0) {
+                        throw new Error('Invalid item value #' + (i + 1));
+                    }
+                });
+
+                range.forEach(function(rangeMessage) {
+
+                    for (var i = 0, len = connection.server.storeFilters.length; i < len; i++) {
+                        if (!connection.server.storeFilters[i](connection, rangeMessage[1], parsed, rangeMessage[0])) {
+                            return;
+                        }
+                    }
+
+                    var handler = connection.server.storeHandlers[itemName] || storeHandlers[itemName];
+                    if (!handler) {
+                        throw new Error('Invalid STORE argument ' + itemName);
+                    }
+
+                    handler(connection, rangeMessage[1], itemValue, rangeMessage[0], parsed, data);
+
+                    affected.push(rangeMessage[1]);
+                });
+
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'STORE FAILED', parsed, data);
+                return callback();
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'STORE completed'
+                }]
+            }, 'STORE COMPLETE', parsed, data, affected);
+
+            callback();
+        },
+
+        EXPUNGE: function(connection, parsed, data, callback) {
+            if (parsed.attributes) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'EXPUNGE does not take any arguments'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'FETCH FAILED', parsed, data);
+                return callback();
+            }
+
+            connection.expungeDeleted(connection.selectedMailbox, false, true);
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'EXPUNGE Completed'
+                }]
+            }, 'EXPUNGE completed', parsed, data);
+
+            callback();
+        },
+
+        SEARCH: function(connection, parsed, data, callback) {
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            if (!parsed.attributes || !parsed.attributes.length) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'SEARCH expects search criteria, empty query given'
+                    }]
+                }, 'SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            var params;
+
+            try {
+                params = parsed.attributes.map(function(argument, i) {
+                    if (['STRING', 'ATOM', 'LITERAL', 'SEQUENCE'].indexOf(argument.type) < 0) {
+                        throw new Error('Invalid search criteria argument #' + (i + 1));
+                    }
+                    return argument.value;
+                });
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            var messages = connection.selectedMailbox.messages,
+                searchResult;
+
+            for (var i = 0, len = connection.notificationQueue.length; i < len; i++) {
+                if (connection.notificationQueue[i].mailboxCopy) {
+                    messages = connection.notificationQueue[i].mailboxCopy;
+                    break;
+                }
+            }
+
+            try {
+                searchResult = makeSearch(connection, messages, params);
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'NO',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.stack
+                    }]
+                }, 'SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            if (searchResult && searchResult.list && searchResult.list.length) {
+                connection.sendResponse({
+                    tag: '*',
+                    command: 'SEARCH',
+                    attributes: searchResult.list.map(function(item) {
+                        return searchResult.numbers[item.uid];
+                    })
+                }, 'SEARCH', parsed, data);
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'SEARCH completed'
+                }]
+            }, 'SEARCH', parsed, data);
+            return callback();
+        },
+
+        'UID FETCH': function(connection, parsed, data, callback) {
+
+            if (!parsed.attributes ||
+                parsed.attributes.length !== 2 ||
+                !parsed.attributes[0] ||
+                ['ATOM', 'SEQUENCE'].indexOf(parsed.attributes[0].type) < 0 ||
+                !parsed.attributes[1] ||
+                (['ATOM'].indexOf(parsed.attributes[1].type) < 0 && !Array.isArray(parsed.attributes[1]))
+            ) {
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'FETCH expects sequence set and message item names'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'UID FETCH FAILED', parsed, data);
+                return callback();
+            }
+
+            var range = connection.server.getMessageRange(connection.selectedMailbox, parsed.attributes[0].value, true),
+                params = [].concat(parsed.attributes[1] || []),
+                macros = {
+                    'ALL': ['FLAGS', 'INTERNALDATE', 'RFC822.SIZE', 'ENVELOPE'],
+                    'FAST': ['FLAGS', 'INTERNALDATE', 'RFC822.SIZE'],
+                    'FULL': ['FLAGS', 'INTERNALDATE', 'RFC822.SIZE', 'ENVELOPE', 'BODY']
+                };
+
+            if (parsed.attributes[1].type === 'ATOM' && macros.hasOwnProperty(parsed.attributes[1].value.toUpperCase())) {
+                params = macros[parsed.attributes[1].value.toUpperCase()];
+            }
+
+            try {
+                var uidExist = false,
+                    flagsExist = false,
+                    forceSeen = false;
+
+                params.forEach(function(param, i) {
+                    if (!param || (typeof param !== 'string' && param.type !== 'ATOM')) {
+                        throw new Error('Invalid FETCH argument #' + (i + 1));
+                    }
+
+                    if (typeof param === 'string') {
+                        param = params[i] = {
+                            type: 'ATOM',
+                            value: param
+                        };
+                    }
+
+                    if (param.value.toUpperCase() === 'FLAGS') {
+                        flagsExist = true;
+                    }
+
+                    if (param.value.toUpperCase() === 'UID') {
+                        uidExist = true;
+                    }
+
+                    if (!connection.readOnly) {
+                        if (param.value.toUpperCase() === 'BODY' && param.section) {
+                            forceSeen = true;
+                        } else if (['RFC822', 'RFC822.HEADER'].indexOf(param.value.toUpperCase()) >= 0) {
+                            forceSeen = true;
+                        }
+                    }
+                });
+
+                if (forceSeen && !flagsExist) {
+                    params.push({
+                        type: 'ATOM',
+                        value: 'FLAGS'
+                    });
+                }
+
+                if (!uidExist) {
+                    params.push({
+                        type: 'ATOM',
+                        value: 'UID'
+                    });
+                }
+
+                range.forEach(function(rangeMessage) {
+                    var name, key, handler, response = [],
+                        value;
+
+                    if (forceSeen && rangeMessage[1].flags.indexOf('\\Seen') < 0) {
+                        rangeMessage[1].flags.push('\\Seen');
+                    }
+
+                    for (var i = 0, len = params.length; i < len; i++) {
+                        key = (params[i].value || '').toUpperCase();
+
+                        handler = connection.server.fetchHandlers[key];
+                        if (!handler) {
+                            throw new Error('Invalid FETCH argument ' + (key ? ' ' + key : '#' + (i + 1)));
+                        }
+
+                        value = handler(connection, rangeMessage[1], params[i]);
+
+                        name = typeof params[i] === 'string' ? {
+                            type: 'ATOM',
+                            value: key
+                        } : params[i];
+                        name.value = name.value.replace(/\.PEEK\b/i, '');
+                        response.push(name);
+                        response.push(value);
+                    }
+
+                    connection.sendResponse({
+                        tag: '*',
+                        attributes: [rangeMessage[0], {
+                                type: 'ATOM',
+                                value: 'FETCH'
+                            },
+                            response
+                        ]
+                    }, 'UID FETCH', parsed, data);
+                });
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'UID FETCH FAILED', parsed, data);
+                return callback();
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'UID FETCH Completed'
+                }]
+            }, 'UID FETCH', parsed, data);
+            return callback();
+        },
+
+        'UID SEARCH': function(connection, parsed, data, callback) {
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'UID SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            if (!parsed.attributes || !parsed.attributes.length) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'UID SEARCH expects search criteria, empty query given'
+                    }]
+                }, 'UID SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            var params;
+
+            try {
+                params = parsed.attributes.map(function(argument, i) {
+                    if (['STRING', 'ATOM', 'LITERAL', 'SEQUENCE'].indexOf(argument.type) < 0) {
+                        throw new Error('Invalid search criteria argument #' + (i + 1));
+                    }
+                    return argument.value;
+                });
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'UID SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            var messages = connection.selectedMailbox.messages,
+                searchResult;
+
+            try {
+                searchResult = makeSearch(connection, messages, params);
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'NO',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'UID SEARCH FAILED', parsed, data);
+                return callback();
+            }
+
+            if (searchResult && searchResult.list && searchResult.list.length) {
+                connection.sendResponse({
+                    tag: '*',
+                    command: 'SEARCH',
+                    attributes: searchResult.list.map(function(item) {
+                        return item.uid;
+                    })
+                }, 'UID SEARCH', parsed, data);
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'UID SEARCH completed'
+                }]
+            }, 'UID SEARCH', parsed, data);
+            return callback();
+        },
+
+        'UID STORE': function(connection, parsed, data, callback) {
+            var storeHandlers = getStoreHandlers();
+
+            if (!parsed.attributes ||
+                parsed.attributes.length !== 3 ||
+                !parsed.attributes[0] ||
+                ['ATOM', 'SEQUENCE'].indexOf(parsed.attributes[0].type) < 0 ||
+                !parsed.attributes[1] ||
+                (['ATOM'].indexOf(parsed.attributes[1].type) < 0) ||
+                !parsed.attributes[2] ||
+                !(['ATOM', 'STRING'].indexOf(parsed.attributes[2].type) >= 0 || Array.isArray(parsed.attributes[2]))
+            ) {
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'UID STORE expects sequence set, item name and item value'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'UID STORE FAILED', parsed, data);
+                return callback();
+            }
+
+            var range = connection.server.getMessageRange(connection.selectedMailbox, parsed.attributes[0].value, true),
+                itemName = (parsed.attributes[1].value || '').toUpperCase(),
+                itemValue = [].concat(parsed.attributes[2] || []),
+                affected = [];
+
+            try {
+
+                itemValue.forEach(function(item, i) {
+                    if (!item || ['STRING', 'ATOM'].indexOf(item.type) < 0) {
+                        throw new Error('Invalid item value #' + (i + 1));
+                    }
+                });
+
+                range.forEach(function(rangeMessage) {
+
+                    for (var i = 0, len = connection.server.storeFilters.length; i < len; i++) {
+                        if (!connection.server.storeFilters[i](connection, rangeMessage[1], parsed, rangeMessage[0])) {
+                            return;
+                        }
+                    }
+
+                    var handler = connection.server.storeHandlers[itemName] || storeHandlers[itemName];
+                    if (!handler) {
+                        throw new Error('Invalid STORE argument ' + itemName);
+                    }
+
+                    handler(connection, rangeMessage[1], itemValue, rangeMessage[0], parsed, data);
+                    affected.push(rangeMessage[1]);
+                });
+
+            } catch (E) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: E.message
+                    }]
+                }, 'UID STORE FAILED', parsed, data);
+                return callback();
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'UID STORE completed'
+                }]
+            }, 'UID STORE COMPLETE', parsed, data, range);
+
+            callback();
         }
     };
+
+    BrowserCrow.prototype.pluginHandlers = {
+        XOAUTH2: function(server) {
+            // Register capability, usable for non authenticated users
+            server.registerCapability('AUTH=XOAUTH2', function(connection) {
+                return connection.state === 'Not Authenticated';
+            });
+
+            server.setCommandHandler('AUTHENTICATE XOAUTH2', function(connection, parsed, data, callback) {
+
+                // Not allowed if already logged in
+                if (connection.state !== 'Not Authenticated') {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Already authenticated, identity change not allowed'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    return callback();
+                }
+
+                if (!server.capabilities['SASL-IR'] || !server.capabilities['SASL-IR'](connection)) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'SASL-IR must be enabled to support XOAUTH2'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    return callback();
+                }
+
+                if (parsed.attributes.length !== 1 ||
+                    !parsed.attributes[0] ||
+                    ['STRING', 'ATOM'].indexOf(parsed.attributes[0].type) < 0
+                ) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'NO',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Invalid SASL argument'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    return callback();
+                }
+
+                var parts = mimefuncs.base64Decode(parsed.attributes[0].value).split('\x01');
+                var user = (parts[0] || '').substr(5);
+                var accessToken = (parts[1] || '').substr(12);
+
+                if (parts.length !== 4 ||
+                    !parts[0].match(/^user\=/) ||
+                    !parts[1].match(/^auth\=Bearer /) ||
+                    !user || // Must be present
+                    !accessToken || // Must be present
+                    parts[2] || // Must be empty
+                    parts[3] // Must be empty
+                ) {
+
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'NO',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Invalid SASL argument.'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    return callback();
+                }
+
+                if (!connection.server.users.hasOwnProperty(user)) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'NO',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Invalid credentials'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    return callback();
+                }
+
+                if (!connection.server.users.hasOwnProperty(user) ||
+                    !connection.server.users[user].xoauth2 ||
+                    connection.server.users[user].xoauth2.accessToken !== accessToken) {
+
+                    connection.sendResponse({
+                        tag: '+',
+                        attributes: [{
+                            type: 'ATOM',
+                            value: mimefuncs.base64.encode(JSON.stringify({
+                                'status': '400',
+                                'schemes': 'Bearer',
+                                'scope': 'https://mail.google.com/'
+                            }))
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+
+                    // wait for response
+                    connection.inputHandler = function() {
+                        connection.inputHandler = false;
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'NO',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'SASL authentication failed'
+                            }]
+                        }, 'AUTHENTICATE XOAUTH2 FAILED', parsed, data);
+                    };
+                } else {
+
+                    connection.state = 'Authenticated';
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'OK',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'User logged in'
+                        }]
+                    }, 'AUTHENTICATE XOAUTH2 SUCCESS', parsed, data);
+
+                }
+                return callback();
+            });
+        },
+
+        'SASL-IR': function(server) {
+            server.registerCapability('SASL-IR', function(connection) {
+                return connection.state === 'Not Authenticated';
+            });
+        },
+
+        'SPECIAL-USE': function(server) {
+            // Register capability
+            server.registerCapability('SPECIAL-USE');
+
+            var listHandler = server.getCommandHandler('LIST');
+
+            server.setCommandHandler('LIST', function(connection, parsed, data, callback) {
+                var i;
+                if (parsed.attributes && Array.isArray(parsed.attributes[0])) {
+                    for (i = parsed.attributes[0].length - 1; i >= 0; i--) {
+                        if (parsed.attributes[0][i] && parsed.attributes[0][i].type === 'ATOM' &&
+                            parsed.attributes[0][i].value.toUpperCase() === 'SPECIAL-USE') {
+
+                            parsed.attributes[0].splice(i, 1);
+                            parsed.listSpecialUseOnly = true;
+                        }
+                    }
+                    // remove parameter if no other memebers were left
+                    if (!parsed.attributes[0].length) {
+                        parsed.attributes.splice(0, 1);
+                    }
+                }
+
+                if (parsed.attributes && parsed.attributes[2] &&
+                    parsed.attributes[2].type === 'ATOM' &&
+                    parsed.attributes[2].value.toUpperCase() === 'RETURN' &&
+                    Array.isArray(parsed.attributes[3])) {
+
+                    for (i = parsed.attributes[3].length - 1; i >= 0; i--) {
+                        if (parsed.attributes[3][i] && parsed.attributes[3][i].type === 'ATOM' &&
+                            parsed.attributes[3][i].value.toUpperCase() === 'SPECIAL-USE') {
+
+                            parsed.attributes[3].splice(i, 1);
+                            parsed.listSpecialUseFlags = true;
+                        }
+                    }
+
+                    // Remove RETURN (List) if no members were left
+                    if (!parsed.attributes[3].length) {
+                        parsed.attributes.splice(2, 2);
+                    }
+                }
+
+                listHandler(connection, parsed, data, callback);
+            });
+
+            server.outputHandlers.push(function(connection, response, description, parsed, data, folder) {
+                var specialUseList = [].concat(folder && folder['special-use'] || []).map(function(specialUse) {
+                    return {
+                        type: 'ATOM',
+                        value: specialUse
+                    };
+                });
+
+                if (
+                    (description === 'LIST ITEM' || description === 'LSUB ITEM') &&
+                    folder &&
+                    response.attributes &&
+                    Array.isArray(response.attributes[0])) {
+
+                    if (folder['special-use'] && specialUseList.length) {
+                        if (parsed.listSpecialUseFlags) {
+                            // Show only special use flag
+                            response.attributes[0] = specialUseList;
+                        } else {
+                            response.attributes[0] = response.attributes[0].concat(specialUseList);
+                        }
+                    } else {
+                        if (parsed.listSpecialUseFlags) {
+                            // No flags to display
+                            response.attributes[0] = [];
+                        }
+                        if (parsed.listSpecialUseOnly) {
+                            // Do not show this response
+                            response.skipResponse = true;
+                        }
+                    }
+                }
+            });
+        },
+
+        ID: function(server) {
+            // Register capability, always usable
+            server.registerCapability('ID');
+
+            // Add ID command
+            server.setCommandHandler('ID', function(connection, parsed, data, callback) {
+                var clientList = {},
+                    serverList = null,
+                    list, i, len, key;
+
+                // Require exactly 1 attribute (NIL or parameter list)
+                if (!parsed.attributes || parsed.attributes.length !== 1) {
+                    return sendError('ID expects 1 attribute', connection, parsed, data, callback);
+                }
+                list = parsed.attributes[0];
+                if (list && !Array.isArray(list) || (list && list.length % 2)) {
+                    return sendError('ID expects valid parameter list', connection, parsed, data, callback);
+                }
+
+                // Build client ID object and check validity of the values
+                if (list && list.length) {
+                    for (i = 0, len = list.length; i < len; i++) {
+                        if (i % 2 === 0) {
+                            // Handle keys (always strings)
+                            if (list[i] && ['STRING', 'LITERAL'].indexOf(list[i].type) >= 0) {
+                                key = list[i].value;
+                            } else {
+                                return sendError('ID expects valid parameter list', connection, parsed, data, callback);
+                            }
+                        } else {
+                            // Handle values (string or NIL)
+                            if (!list[i] || ['STRING', 'LITERAL'].indexOf(list[i].type) >= 0) {
+                                clientList[key] = list[i] && list[i].value || null;
+                            } else {
+                                return sendError('ID expects valid parameter list', connection, parsed, data, callback);
+                            }
+                        }
+                    }
+                }
+
+                // Build response object from server options
+                if (server.options.id) {
+                    serverList = [];
+                    Object.keys(server.options.id).forEach(function(key) {
+                        serverList.push({
+                            type: 'STRING',
+                            value: key
+                        });
+                        serverList.push({
+                            type: 'STRING',
+                            value: (server.options.id[key] || '').toString()
+                        });
+                    });
+                }
+
+                // Send untagged ID response
+                connection.sendResponse({
+                    tag: '*',
+                    command: 'ID',
+                    attributes: [
+                        serverList
+                    ]
+                }, 'ID', parsed, data, clientList);
+
+                // Send tagged response
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'OK',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'ID command completed'
+                    }]
+                }, 'ID', parsed, data, clientList);
+
+                callback();
+            });
+        }
+    };
+
+    function sendError(message, connection, parsed, data, callback) {
+        connection.sendResponse({
+            tag: parsed.tag,
+            command: 'BAD',
+            attributes: [{
+                type: 'TEXT',
+                value: message
+            }]
+        }, 'INVALID COMMAND', parsed, data);
+        return callback();
+    }
 
     function resolveContext(source, path) {
         var pathNumbers = path.split('.'),
@@ -1722,6 +2777,577 @@
         }
 
         return context;
+    }
+
+    function makeSearch(connection, messageSource, params) {
+        var totalResults = [],
+
+            nrCache = {},
+
+            query,
+
+            charset,
+
+            queryParams = {
+                'BCC': ['VALUE'],
+                'BEFORE': ['VALUE'],
+                'BODY': ['VALUE'],
+                'CC': ['VALUE'],
+                'FROM': ['VALUE'],
+                'HEADER': ['VALUE', 'VALUE'],
+                'KEYWORD': ['VALUE'],
+                'LARGER': ['VALUE'],
+                'NOT': ['COMMAND'],
+                'ON': ['VALUE'],
+                'OR': ['COMMAND', 'COMMAND'],
+                'SENTBEFORE': ['VALUE'],
+                'SENTON': ['VALUE'],
+                'SENTSINCE': ['VALUE'],
+                'SINCE': ['VALUE'],
+                'SMALLER': ['VALUE'],
+                'SUBJECT': ['VALUE'],
+                'TEXT': ['VALUE'],
+                'TO': ['VALUE'],
+                'UID': ['VALUE'],
+                'UNKEYWORD': ['VALUE']
+            },
+
+            composeQuery = function(params) {
+                params = [].concat(params || []);
+
+                var pos = 0,
+                    param,
+                    returnParams = [];
+
+                var getParam = function(level) {
+                    level = level || 0;
+                    if (pos >= params.length) {
+                        return undefined;
+                    }
+
+                    var param = params[pos++],
+                        paramTypes = queryParams[param.toUpperCase()] || [],
+                        paramCount = paramTypes.length,
+                        curParams = [param.toUpperCase()];
+
+                    if (paramCount) {
+                        for (var i = 0, len = paramCount; i < len; i++) {
+                            switch (paramTypes[i]) {
+                                case 'VALUE':
+                                    curParams.push(params[pos++]);
+                                    break;
+                                case 'COMMAND':
+                                    curParams.push(getParam(level + 1));
+                                    break;
+                            }
+                        }
+                    }
+                    return curParams;
+                };
+
+                while (typeof(param = getParam()) !== 'undefined') {
+                    returnParams.push(param);
+                }
+
+                return returnParams;
+            },
+
+            searchFlags = function(flag, flagExists) {
+                var results = [];
+                messageSource.forEach(function(message, i) {
+                    if (
+                        (flagExists && message.flags.indexOf(flag) >= 0) ||
+                        (!flagExists && message.flags.indexOf(flag) < 0)) {
+                        nrCache[message.uid] = i + 1;
+                        results.push(message);
+                    }
+                });
+                return results;
+            },
+
+            searchHeaders = function(key, value, includeEmpty) {
+                var results = [];
+                key = (key || '').toString().toLowerCase();
+                value = (value || '').toString();
+                if (!value && !includeEmpty) {
+                    return [];
+                }
+
+                messageSource.forEach(function(message, i) {
+                    if (!message.parsed) {
+                        message.parsed = mimeParser(message.raw || '');
+                    }
+                    var headers = (message.parsed.header || []),
+                        parts,
+                        lineKey, lineValue;
+
+                    for (var j = 0, len = headers.length; j < len; j++) {
+                        parts = headers[j].split(':');
+                        lineKey = (parts.shift() || '').trim().toLowerCase();
+                        lineValue = (parts.join(':') || '');
+
+                        if (lineKey === key && (!value || lineValue.toLowerCase().indexOf(value.toLowerCase()) >= 0)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                            return;
+                        }
+                    }
+                });
+                return results;
+            },
+
+            queryHandlers = {
+                '_SEQ': function(sequence) {
+                    return connection.server.getMessageRange(messageSource, sequence).map(function(item) {
+                        nrCache[item[1].uid] = item[0];
+                        return item[1];
+                    });
+                },
+                'ALL': function() {
+                    return messageSource.map(function(message, i) {
+                        nrCache[message.uid] = i + 1;
+                        return message;
+                    });
+                },
+                'ANSWERED': function() {
+                    return searchFlags('\\Answered', true);
+                },
+                'BCC': function(value) {
+                    return searchHeaders('BCC', value);
+                },
+                'BEFORE': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (new Date(message.internaldate.substr(0, 11)).toISOString().substr(0, 10) < new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'BODY': function(value) {
+                    var results = [];
+                    value = (value || '').toString();
+                    if (!value) {
+                        return [];
+                    }
+
+                    messageSource.forEach(function(message, i) {
+                        if (!message.parsed) {
+                            message.parsed = mimeParser(message.raw || '');
+                        }
+                        if ((message.parsed.text || '').toLowerCase().indexOf(value.toLowerCase()) >= 0) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'CC': function(value) {
+                    return searchHeaders('CC', value);
+                },
+                'DELETED': function() {
+                    return searchFlags('\\Deleted', true);
+                },
+                'DRAFT': function() {
+                    return searchFlags('\\Draft', true);
+                },
+                'FLAGGED': function() {
+                    return searchFlags('\\Flagged', true);
+                },
+                'FROM': function(value) {
+                    return searchHeaders('FROM', value);
+                },
+                'HEADER': function(key, value) {
+                    return searchHeaders(key, value, true);
+                },
+                'KEYWORD': function(flag) {
+                    return searchFlags(flag, true);
+                },
+                'LARGER': function(size) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if ((message.raw || '').length >= Number(size)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'NEW': function() {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (message.flags.indexOf('\\Recent') >= 0 && message.flags.indexOf('\\Seen') < 0) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'NOT': function(q) {
+                    if (!queryHandlers[q[0]] && q[0].match(/^[\d\,\:\*]+$/)) {
+                        q.unshift('_SEQ');
+                    } else if (!queryHandlers[q[0]]) {
+                        throw new Error('NO Invalid query element: ' + q[0] + ' (Failure)');
+                    }
+
+                    var notResults = queryHandlers[q.shift()].apply(connection, q),
+                        results = [];
+
+                    messageSource.forEach(function(message, i) {
+                        if (notResults.indexOf(message) < 0) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'OLD': function() {
+                    return searchFlags('\\Recent', false);
+                },
+                'ON': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (new Date(message.internaldate.substr(0, 11)).toISOString().substr(0, 10) === new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'OR': function(left, right) {
+                    var jointResult = [],
+                        leftResults, rightResults;
+
+                    if (!queryHandlers[left[0]] && left[0].match(/^[\d\,\:\*]+$/)) {
+                        left.unshift('_SEQ');
+                    } else if (!queryHandlers[left[0]]) {
+                        throw new Error('NO Invalid query element: ' + left[0] + ' (Failure)');
+                    }
+
+                    if (!queryHandlers[right[0]] && right[0].match(/^[\d\,\:\*]+$/)) {
+                        right.unshift('_SEQ');
+                    } else if (!queryHandlers[right[0]]) {
+                        throw new Error('NO Invalid query element: ' + right[0] + ' (Failure)');
+                    }
+
+                    leftResults = queryHandlers[left.shift()].apply(connection, left);
+                    rightResults = queryHandlers[right.shift()].apply(connection, right);
+
+                    jointResult = jointResult.concat(leftResults);
+                    rightResults.forEach(function(message) {
+                        if (jointResult.indexOf(message) < 0) {
+                            jointResult.push(message);
+                        }
+                    });
+
+                    return jointResult;
+                },
+                'RECENT': function() {
+                    return searchFlags('\\Recent', true);
+                },
+                'SEEN': function() {
+                    return searchFlags('\\Seen', true);
+                },
+                'SENTBEFORE': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (!message.parsed) {
+                            message.parsed = mimeParser(message.raw || '');
+                        }
+                        var messageDate = message.parsed.parsedHeader.date || message.internaldate;
+                        if (Object.prototype.toString.call(messageDate) !== '[object Date]') {
+                            messageDate = new Date(messageDate.substr(0, 11));
+                        }
+                        if (messageDate.toISOString().substr(0, 10) < new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'SENTON': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (!message.parsed) {
+                            message.parsed = mimeParser(message.raw || '');
+                        }
+                        var messageDate = message.parsed.parsedHeader.date || message.internaldate;
+                        if (Object.prototype.toString.call(messageDate) !== '[object Date]') {
+                            messageDate = new Date(messageDate.substr(0, 11));
+                        }
+                        if (messageDate.toISOString().substr(0, 10) === new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'SENTSINCE': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (!message.parsed) {
+                            message.parsed = mimeParser(message.raw || '');
+                        }
+                        var messageDate = message.parsed.parsedHeader.date || message.internaldate;
+                        if (Object.prototype.toString.call(messageDate) !== '[object Date]') {
+                            messageDate = new Date(messageDate.substr(0, 11));
+                        }
+                        if (messageDate.toISOString().substr(0, 10) >= new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'SINCE': function(date) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if (new Date(message.internaldate.substr(0, 11)).toISOString().substr(0, 10) >= new Date(date).toISOString().substr(0, 10)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'SMALLER': function(size) {
+                    var results = [];
+                    messageSource.forEach(function(message, i) {
+                        if ((message.raw || '').length < Number(size)) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'SUBJECT': function(value) {
+                    return searchHeaders('SUBJECT', value);
+                },
+                'TEXT': function(value) {
+                    var results = [];
+                    value = (value || '').toString();
+                    if (!value) {
+                        return [];
+                    }
+
+                    messageSource.forEach(function(message, i) {
+                        if ((message.raw || '').toString().toLowerCase().indexOf(value.toLowerCase()) >= 0) {
+                            nrCache[message.uid] = i + 1;
+                            results.push(message);
+                        }
+                    });
+                    return results;
+                },
+                'TO': function(value) {
+                    return searchHeaders('TO', value);
+                },
+                'UID': function(sequence) {
+                    return connection.server.getMessageRange(messageSource, sequence, true).map(function(item) {
+                        nrCache[item[1].uid] = item[0];
+                        return item[1];
+                    });
+                },
+                'UNANSWERED': function() {
+                    return searchFlags('\\Answered', false);
+                },
+                'UNDELETED': function() {
+                    return searchFlags('\\Deleted', false);
+                },
+                'UNDRAFT': function() {
+                    return searchFlags('\\Draft', false);
+                },
+                'UNFLAGGED': function() {
+                    return searchFlags('\\Flagged', false);
+                },
+                'UNKEYWORD': function(flag) {
+                    return searchFlags(flag, false);
+                },
+                'UNSEEN': function() {
+                    return searchFlags('\\Seen', false);
+                }
+            };
+
+        Object.keys(connection.server.searchHandlers).forEach(function(key) {
+
+            // if handler takes more than 3 params (mailbox, message, i), use the remaining as value params
+            if (!(key in queryParams) && connection.server.searchHandlers[key].length > 3) {
+                queryParams[key] = [];
+                for (var i = 0, len = connection.server.searchHandlers[key].length - 3; i < len; i++) {
+                    queryParams[key].push('VALUE');
+                }
+            }
+
+            queryHandlers[key] = function() {
+                var args = Array.prototype.slice.call(arguments),
+                    results = [];
+
+                // check all messages against the user defined function
+                messageSource.forEach(function(message, i) {
+                    if (connection.server.searchHandlers[key].apply(null, [connection, message, i + 1].concat(args))) {
+                        nrCache[message.uid] = i + 1;
+                        results.push(message);
+                    }
+                });
+                return results;
+            };
+
+        });
+
+        // FIXME: charset is currently ignored
+        if ((params[0] || '').toString().toUpperCase() === 'CHARSET') {
+            params.shift(); // CHARSET
+            charset = params.shift(); // value
+        }
+
+        query = composeQuery(params);
+        query.forEach(function(q, i) {
+
+            if (!queryHandlers[q[0]] && q[0].match(/^[\d\,\:\*]+$/)) {
+                q.unshift('_SEQ');
+            } else if (!queryHandlers[q[0]]) {
+                throw new Error('NO Invalid query element: ' + q[0] + ' (Failure)');
+            }
+
+            var key = q.shift(),
+                handler = queryHandlers[key],
+                currentResult = handler && handler.apply(connection, q) || [];
+
+            if (!i) {
+                totalResults = [].concat(currentResult || []);
+            } else {
+                for (var j = totalResults.length - 1; j >= 0; j--) {
+                    if (currentResult.indexOf(totalResults[j]) < 0) {
+                        totalResults.splice(j, 1);
+                    }
+                }
+            }
+        });
+        return {
+            list: totalResults,
+            numbers: nrCache
+        };
+    }
+
+    function getStoreHandlers() {
+        var storeHandlers = {};
+
+        function checkSystemFlags(connection, flag) {
+            if (flag.charAt(0) === '\\' && connection.server.systemFlags.indexOf(flag) < 0) {
+                throw new Error('Invalid system flag ' + flag);
+            }
+        }
+
+        function setFlags(connection, message, flags) {
+            var messageFlags = [];
+            [].concat(flags).forEach(function(flag) {
+                flag = flag.value || flag;
+                checkSystemFlags(connection, flag);
+
+                // Ignore if it is not in allowed list and only permament flags are allowed to use
+                if (connection.selectedMailbox.permanentFlags.indexOf(flag) < 0 && !connection.selectedMailbox.allowPermanentFlags) {
+                    return;
+                }
+
+                if (messageFlags.indexOf(flag) < 0) {
+                    messageFlags.push(flag);
+                }
+            });
+            message.flags = messageFlags;
+        }
+
+        function addFlags(connection, message, flags) {
+            [].concat(flags).forEach(function(flag) {
+                flag = flag.value || flag;
+                checkSystemFlags(connection, flag);
+
+                // Ignore if it is not in allowed list and only permament flags are allowed to use
+                if (connection.selectedMailbox.permanentFlags.indexOf(flag) < 0 && !connection.selectedMailbox.allowPermanentFlags) {
+                    return;
+                }
+
+                if (message.flags.indexOf(flag) < 0) {
+                    message.flags.push(flag);
+                }
+            });
+        }
+
+        function removeFlags(connection, message, flags) {
+            [].concat(flags).forEach(function(flag) {
+                flag = flag.value || flag;
+                checkSystemFlags(connection, flag);
+
+                if (message.flags.indexOf(flag) >= 0) {
+                    for (var i = 0; i < message.flags.length; i++) {
+                        if (message.flags[i] === flag) {
+                            message.flags.splice(i, 1);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        function sendUpdate(connection, parsed, data, index, message) {
+            var resp = [{
+                    type: 'ATOM',
+                    value: 'FLAGS'
+                },
+                message.flags.map(function(flag) {
+                    return {
+                        type: 'ATOM',
+                        value: flag
+                    };
+                })
+            ];
+
+            if ((parsed.command || '').toUpperCase() === 'UID STORE') {
+                resp.push({
+                    type: 'ATOM',
+                    value: 'UID'
+                });
+                resp.push(message.uid);
+            }
+
+            connection.sendResponse({
+                tag: '*',
+                attributes: [
+                    index, {
+                        type: 'ATOM',
+                        value: 'FETCH'
+                    },
+                    resp
+                ]
+            }, 'FLAG UPDATE', parsed, data, message);
+        }
+
+        storeHandlers.FLAGS = function(connection, message, flags, index, parsed, data) {
+            setFlags(connection, message, flags);
+            sendUpdate(connection, parsed, data, index, message);
+        };
+
+        storeHandlers['+FLAGS'] = function(connection, message, flags, index, parsed, data) {
+            addFlags(connection, message, flags);
+            sendUpdate(connection, parsed, data, index, message);
+        };
+
+        storeHandlers['-FLAGS'] = function(connection, message, flags, index, parsed, data) {
+            removeFlags(connection, message, flags);
+            sendUpdate(connection, parsed, data, index, message);
+        };
+
+        storeHandlers['FLAGS.SILENT'] = function(connection, message, flags) {
+            setFlags(connection, message, flags);
+        };
+
+        storeHandlers['+FLAGS.SILENT'] = function(connection, message, flags) {
+            addFlags(connection, message, flags);
+        };
+
+        storeHandlers['-FLAGS.SILENT'] = function(connection, message, flags) {
+            removeFlags(connection, message, flags);
+        };
+
+        return storeHandlers;
     }
 
     return BrowserCrow;
