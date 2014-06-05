@@ -18,6 +18,7 @@
 
         this.options = options || {};
 
+        this.connectionHandlers = [];
         this.capabilities = [];
         this.outputHandlers = [];
         this.messageHandlers = [];
@@ -26,6 +27,7 @@
         this.storeFilters = [];
         this.storeHandlers = {};
         this.searchHandlers = {};
+        this.pluginFetchHandlers = {};
 
         this.connections = [];
 
@@ -362,6 +364,10 @@
 
         var connection = new CrowConnection(this, options);
         this.connections.push(connection);
+
+        this.connectionHandlers.forEach(function(handler) {
+            handler(connection);
+        });
 
         setTimeout(function() {
             connection._state = 'open';
@@ -1789,7 +1795,7 @@
                     for (i = 0, len = params.length; i < len; i++) {
                         key = (params[i].value || '').toUpperCase();
 
-                        handler = connection.server.fetchHandlers[key];
+                        handler = connection.server.pluginFetchHandlers[key] || connection.server.fetchHandlers[key];
                         if (!handler) {
                             throw new Error('Invalid FETCH argument ' + (key ? ' ' + key : '#' + (i + 1)));
                         }
@@ -1816,7 +1822,6 @@
                     }, 'FETCH', parsed, data);
                 });
             } catch (E) {
-                console.log(E);
                 connection.sendResponse({
                     tag: parsed.tag,
                     command: 'BAD',
@@ -2218,7 +2223,7 @@
                     for (var i = 0, len = params.length; i < len; i++) {
                         key = (params[i].value || '').toUpperCase();
 
-                        handler = connection.server.fetchHandlers[key];
+                        handler = connection.server.pluginFetchHandlers[key] || connection.server.fetchHandlers[key];
                         if (!handler) {
                             throw new Error('Invalid FETCH argument ' + (key ? ' ' + key : '#' + (i + 1)));
                         }
@@ -2439,6 +2444,244 @@
             }, 'UID STORE COMPLETE', parsed, data, range);
 
             callback();
+        },
+
+        COPY: function(connection, parsed, data, callback) {
+
+            if (!parsed.attributes ||
+                parsed.attributes.length !== 2 ||
+                !parsed.attributes[0] ||
+                ['ATOM', 'SEQUENCE'].indexOf(parsed.attributes[0].type) < 0 ||
+                !parsed.attributes[1] ||
+                ['ATOM', 'STRING'].indexOf(parsed.attributes[1].type) < 0
+            ) {
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'COPY expects sequence set and a mailbox name'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (['Selected'].indexOf(connection.state) < 0) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select mailbox first'
+                    }]
+                }, 'COPY FAILED', parsed, data);
+                return callback();
+            }
+
+            var sequence = parsed.attributes[0].value,
+                path = parsed.attributes[1].value,
+                mailbox = connection.server.getMailbox(path),
+                range = connection.server.getMessageRange(connection.selectedMailbox, sequence, false);
+
+            if (!mailbox) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'NO',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Target mailbox does not exist'
+                    }]
+                }, 'COPY FAIL', parsed, data);
+                return callback();
+            }
+
+            range.forEach(function(rangeMessage) {
+                var message = rangeMessage[1],
+                    flags = [].concat(message.flags || []),
+                    internaldate = message.internaldate;
+
+                connection.server.appendMessage(mailbox, flags, internaldate, message.raw, connection);
+            });
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'COPY Completed'
+                }]
+            }, 'COPY', parsed, data);
+            callback();
+        },
+
+        APPEND: function(connection, parsed, data, callback) {
+            var args = [].concat(parsed.attributes || []),
+                mailbox, path, flags, internaldate, raw;
+
+            if (['Authenticated', 'Selected'].indexOf(connection.state) < 0) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Log in first'
+                    }]
+                }, 'LIST FAILED', parsed, data);
+                return callback();
+            }
+
+            if (args.length > 4 || args.length < 2) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'APPEND takes 2 - 4 arguments'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            path = args.shift();
+            raw = args.pop();
+
+            if (Array.isArray(args[0])) {
+                flags = args.shift();
+            }
+            internaldate = args.shift();
+
+            if (!path || ['STRING', 'ATOM'].indexOf(path.type) < 0 || !(mailbox = connection.server.getMailbox(path.value))) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Invalid mailbox argument'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (!raw || raw.type !== 'LITERAL') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Invalid message source argument'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (flags) {
+                for (var i = 0, len = flags.length; i < len; i++) {
+                    if (!flags[i] || ['STRING', 'ATOM'].indexOf(flags[i].type) < 0) {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid flags argument'
+                            }]
+                        }, 'INVALID COMMAND', parsed, data);
+                        return callback();
+                    }
+                }
+            }
+
+            if (internaldate && (internaldate.type !== 'STRING' || !connection.server.validateInternalDate(internaldate.value))) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Invalid internaldate argument'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            connection.server.appendMessage(mailbox, (flags || []).map(function(flag) {
+                return flag.value;
+            }), internaldate && internaldate.value, raw.value, connection);
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'APPEND Completed'
+                }]
+            }, 'APPEND', parsed, data);
+            callback();
+        },
+
+        CHECK: function(connection, parsed, data, callback) {
+            if (parsed.attributes) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'CHECK does not take any arguments'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'Completed'
+                }]
+            }, 'CHECK completed', parsed, data);
+
+            callback();
+        },
+
+        CLOSE: function(connection, parsed, data, callback) {
+            if (parsed.attributes) {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'CLOSE does not take any arguments'
+                    }]
+                }, 'INVALID COMMAND', parsed, data);
+                return callback();
+            }
+
+            if (connection.state !== 'Selected') {
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'BAD',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Select a mailbox first'
+                    }]
+                }, 'CLOSE FAILED', parsed, data);
+                return callback();
+            }
+
+            connection.expungeDeleted(connection.selectedMailbox, true);
+
+            connection.sendResponse({
+                tag: parsed.tag,
+                command: 'OK',
+                attributes: [{
+                    type: 'TEXT',
+                    value: 'Mailbox closed'
+                }]
+            }, 'CLOSE', parsed, data);
+
+            connection.state = 'Authenticated';
+            connection.selectedMailbox = false;
+            return callback();
         }
     };
 
@@ -2734,6 +2977,539 @@
                 }, 'ID', parsed, data, clientList);
 
                 callback();
+            });
+        },
+
+        UNSELECT: function(server) {
+            server.registerCapability('UNSELECT');
+
+            // Add ID command
+            server.setCommandHandler('UNSELECT', function(connection, parsed, data, callback) {
+                if (parsed.attributes) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'UNSELECT does not take any arguments'
+                        }]
+                    }, 'INVALID COMMAND', parsed, data);
+                    return callback();
+                }
+
+                if (connection.state !== 'Selected') {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Select a mailbox first'
+                        }]
+                    }, 'UNSELECT FAILED', parsed, data);
+                    return callback();
+                }
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'OK',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'Mailbox unselected'
+                    }]
+                }, 'UNSELECT', parsed, data);
+
+                connection.state = 'Authenticated';
+                connection.selectedMailbox = false;
+                return callback();
+            });
+        },
+
+        IDLE: function(server) {
+
+            server.registerCapability('IDLE');
+
+            server.setCommandHandler('IDLE', function(connection, parsed, data, callback) {
+                if (connection.state === 'Not Authenticated') {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'NO',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Login first'
+                        }]
+                    }, 'INVALID COMMAND', parsed, data);
+                    return callback();
+                }
+
+                if (parsed.attributes) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Unexpected arguments to IDLE'
+                        }]
+                    }, 'INVALID COMMAND', parsed, data);
+                    return callback();
+                }
+
+                var idleTimer = setTimeout(function() {
+                    if (connection._state === 'open') {
+                        connection.sendResponse({
+                            tag: '*',
+                            command: 'BYE',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'IDLE terminated'
+                            }]
+                        }, 'IDLE EXPIRED', parsed, data);
+                        connection.close();
+                    }
+                }, 30 * 60 * 1000);
+
+                connection.directNotifications = true;
+
+                // Temporarily redirect client input to this function
+                connection.inputHandler = function(str) {
+                    clearTimeout(idleTimer);
+
+                    // Stop listening to any other user input
+                    connection.inputHandler = false;
+                    connection.directNotifications = false;
+
+                    if (str.toUpperCase() === 'DONE') {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'OK',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'IDLE terminated'
+                            }]
+                        }, 'IDLE', parsed, data);
+                    } else {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid Idle continuation'
+                            }]
+                        }, 'INVALID IDLE', parsed, data);
+                    }
+                };
+
+                if (connection._state === 'open') {
+                    connection._ondata('+ idling\r\n');
+                }
+
+                connection.processNotifications();
+
+                return callback();
+            });
+        },
+
+        'AUTH=PLAIN': function(server) {
+
+            // Register AUTH=PLAIN capability for non authenticated state
+            server.registerCapability('AUTH=PLAIN', function(connection) {
+                return connection.state === 'Not Authenticated';
+            });
+
+            server.setCommandHandler('AUTHENTICATE PLAIN', function(connection, parsed, data, callback) {
+
+                // Not allowed if already logged in
+                if (connection.state !== 'Not Authenticated') {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Already authenticated, identity change not allowed'
+                        }]
+                    }, 'AUTHENTICATE PLAIN FAILED', parsed, data);
+                    return callback();
+                }
+
+                // If this is the old style api, send + and wait for password
+                if (!parsed.attributes) {
+
+                    // Temporarily redirect client input to this function
+                    connection.inputHandler = function(str) {
+
+                        // Stop listening to any other user input
+                        connection.inputHandler = false;
+
+                        var input = new Buffer(str, 'base64').toString().split('\x00'),
+                            users = connection.server.users,
+                            username = input[1] || '',
+                            password = input[2] || '';
+
+                        if (!users.hasOwnProperty(username) || users[username].password !== password) {
+                            connection.sendResponse({
+                                tag: parsed.tag,
+                                command: 'NO',
+                                attributes: [{
+                                    type: 'TEXT',
+                                    value: 'Login failed: authentication failure'
+                                }]
+                            }, 'AUTHENTICATE PLAIN FAILED', parsed, data);
+                            return callback();
+                        }
+
+                        connection.state = 'Authenticated';
+
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'OK',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'User logged in'
+                            }]
+                        }, 'AUTHENTICATE PLAIN SUCCESS', parsed, data);
+                    };
+
+                    // Send a + to the client
+                    if (connection._state === 'open') {
+                        connection._ondata('+\r\n');
+                    }
+
+                } else if (parsed.attributes.length === 1 &&
+                    // second argument must be Base64 string as ATOM
+                    parsed.attributes[0].type === 'ATOM') {
+
+                    if (!server.capabilities['SASL-IR'] || !server.capabilities['SASL-IR'](connection)) {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'SASL-IR must be enabled to send Initial Response with the request'
+                            }]
+                        }, 'AUTHENTICATE PLAIN FAILED', parsed, data);
+                        return callback();
+                    }
+
+                    var input = new Buffer(parsed.attributes[0].value, 'base64').toString().split('\x00'),
+                        users = connection.server.users,
+                        username = input[1] || '',
+                        password = input[2] || '';
+
+                    if (!users.hasOwnProperty(username) || users[username].password !== password) {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'NO',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Login failed: authentication failure'
+                            }]
+                        }, 'AUTHENTICATE PLAIN FAILED', parsed, data);
+                        return callback();
+                    }
+
+                    connection.state = 'Authenticated';
+
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'OK',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'User logged in'
+                        }]
+                    }, 'AUTHENTICATE PLAIN SUCCESS', parsed, data);
+
+                } else {
+                    // Not correct AUTH=PLAIN
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'Invalid attributes for AUTHENTICATE PLAIN'
+                        }]
+                    }, 'AUTHENTICATE PLAIN FAILED', parsed, data);
+                }
+
+                return callback();
+            });
+        },
+
+        ENABLE: function(server) {
+
+            server.registerCapability('ENABLE');
+
+            server.enableAvailable = [];
+            server.connectionHandlers.push(function(connection) {
+                connection.enabled = [];
+            });
+
+            server.setCommandHandler('ENABLE', function(connection, parsed, data, callback) {
+                var capability, i, len;
+
+                if (['Authenticated'].indexOf(connection.state) < 0) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'ENABLE not allowed now.'
+                        }]
+                    }, 'ENABLE FAILED', parsed, data);
+                    return callback();
+                }
+
+                if (!parsed.attributes) {
+                    connection.sendResponse({
+                        tag: parsed.tag,
+                        command: 'BAD',
+                        attributes: [{
+                            type: 'TEXT',
+                            value: 'ENABLE expects capability list'
+                        }]
+                    }, 'INVALID COMMAND', parsed, data);
+                    return callback();
+                }
+
+                for (i = 0, len = parsed.attributes.length; i < len; i++) {
+                    if (parsed.attributes[i].type !== 'ATOM') {
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Attribute nr ' + (i + 1) + ' is not an ATOM'
+                            }]
+                        }, 'INVALID COMMAND', parsed, data);
+                        return callback();
+                    }
+                }
+
+                for (i = 0, len = parsed.attributes.length; i < len; i++) {
+                    capability = parsed.attributes[i].value.toUpperCase();
+                    if (connection.enabled.indexOf(capability) < 0 && server.enableAvailable.indexOf(capability) >= 0) {
+                        connection.enabled.push(capability);
+                    }
+                }
+
+                connection.sendResponse({
+                    tag: parsed.tag,
+                    command: 'OK',
+                    attributes: [{
+                        type: 'TEXT',
+                        value: 'ENABLE completed'
+                    }]
+                }, 'ENABLE', parsed, data);
+
+                return callback();
+            });
+        },
+
+        CONDSTORE: function(server) {
+
+            // Register capability, always usable
+            server.registerCapability('CONDSTORE');
+            if (Array.isArray(server.enableAvailable)) {
+                server.enableAvailable.push('CONDSTORE');
+            }
+
+            // set modseq values when message is created / initialized
+            server.messageHandlers.push(function(connection, message, mailbox) {
+                if (!message.MODSEQ) {
+                    mailbox.HIGHESTMODSEQ = (mailbox.HIGHESTMODSEQ || 0) + 1;
+                    message.MODSEQ = mailbox.HIGHESTMODSEQ;
+                }
+            });
+
+            server.allowedStatus.push('HIGHESTMODSEQ');
+
+            // Override SELECT and EXAMINE to add
+            var selectHandler = server.getCommandHandler('SELECT'),
+                examineHandler = server.getCommandHandler('EXAMINE'),
+                closeHandler = server.getCommandHandler('CLOSE'),
+                fetchHandler = server.getCommandHandler('FETCH'),
+                uidFetchHandler = server.getCommandHandler('UID FETCH'),
+                storeHandler = server.getCommandHandler('STORE'),
+                uidStoreHandler = server.getCommandHandler('UID STORE'),
+
+                condstoreHandler = function(prevHandler, connection, parsed, data, callback) {
+                    if (hasCondstoreOption(parsed.attributes && parsed.attributes[1], parsed.attributes, 1)) {
+                        connection.sessionCondstore = true;
+                    } else if ('sessionCondstore' in connection) {
+                        connection.sessionCondstore = false;
+                    }
+                    prevHandler(connection, parsed, data, callback);
+                };
+
+            server.setCommandHandler('SELECT', function(connection, parsed, data, callback) {
+                condstoreHandler(selectHandler, connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('EXAMINE', function(connection, parsed, data, callback) {
+                condstoreHandler(examineHandler, connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('CLOSE', function(connection, parsed, data, callback) {
+                if ('sessionCondstore' in connection) {
+                    connection.sessionCondstore = false;
+                }
+                closeHandler(connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('FETCH', function(connection, parsed, data, callback) {
+                var changedsince = getCondstoreValue(parsed.attributes && parsed.attributes[2], 'CHANGEDSINCE', parsed.attributes, 2);
+
+                if (changedsince) {
+                    if (['ATOM', 'STRING'].indexOf(changedsince.type) < 0 ||
+                        !changedsince.value.length ||
+                        isNaN(changedsince.value) ||
+                        Number(changedsince.value) < 0) {
+
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid syntax for CHANGEDSINCE, number expected'
+                            }]
+                        }, 'CONDSTORE FAILED', parsed, data);
+                        return callback();
+                    }
+                    parsed.changedsince = Number(changedsince.value);
+                }
+
+                fetchHandler(connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('UID FETCH', function(connection, parsed, data, callback) {
+                var changedsince = getCondstoreValue(parsed.attributes && parsed.attributes[2], 'CHANGEDSINCE', parsed.attributes, 2);
+
+                if (changedsince) {
+                    if (['ATOM', 'STRING'].indexOf(changedsince.type) < 0 ||
+                        !changedsince.value.length ||
+                        isNaN(changedsince.value) ||
+                        Number(changedsince.value) < 0) {
+
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid syntax for CHANGEDSINCE, number expected'
+                            }]
+                        }, 'CONDSTORE FAILED', parsed, data);
+                        return callback();
+                    }
+                    parsed.changedsince = Number(changedsince.value);
+                }
+
+                uidFetchHandler(connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('STORE', function(connection, parsed, data, callback) {
+                var unchangedsince = getCondstoreValue(parsed.attributes && parsed.attributes[1], 'UNCHANGEDSINCE', parsed.attributes, 1);
+
+                if (unchangedsince) {
+                    if (['ATOM', 'STRING'].indexOf(unchangedsince.type) < 0 ||
+                        !unchangedsince.value.length ||
+                        isNaN(unchangedsince.value) ||
+                        Number(unchangedsince.value) < 0) {
+
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid syntax for UNCHANGEDSINCE, number expected'
+                            }]
+                        }, 'CONDSTORE FAILED', parsed, data);
+                        return callback();
+                    }
+                    parsed.unchangedsince = Number(unchangedsince.value);
+                }
+
+                storeHandler(connection, parsed, data, callback);
+            });
+
+            server.setCommandHandler('UID STORE', function(connection, parsed, data, callback) {
+                var unchangedsince = getCondstoreValue(parsed.attributes && parsed.attributes[1], 'UNCHANGEDSINCE', parsed.attributes, 1);
+
+                if (unchangedsince) {
+                    if (['ATOM', 'STRING'].indexOf(unchangedsince.type) < 0 ||
+                        !unchangedsince.value.length ||
+                        isNaN(unchangedsince.value) ||
+                        Number(unchangedsince.value) < 0) {
+
+                        connection.sendResponse({
+                            tag: parsed.tag,
+                            command: 'BAD',
+                            attributes: [{
+                                type: 'TEXT',
+                                value: 'Invalid syntax for UNCHANGEDSINCE, number expected'
+                            }]
+                        }, 'CONDSTORE FAILED', parsed, data);
+                        return callback();
+                    }
+                    parsed.unchangedsince = Number(unchangedsince.value);
+                }
+
+                uidStoreHandler(connection, parsed, data, callback);
+            });
+
+            server.pluginFetchHandlers.MODSEQ = function(connection, message) {
+                return [message.MODSEQ]; // Must be a list
+            };
+
+            server.fetchFilters.push(function(connection, message, parsed) {
+                return 'changedsince' in parsed ? parsed.changedsince < message.MODSEQ : true;
+            });
+
+            server.storeFilters.push(function(connection, message, parsed) {
+                return 'unchangedsince' in parsed ? parsed.unchangedsince >= message.MODSEQ : true;
+            });
+
+            server.outputHandlers.push(function(connection, response, description, parsed, data, affected) {
+                if (!parsed) {
+                    return;
+                }
+
+                // Increase modseq if flags are updated
+                if ((description === 'STORE COMPLETE' || description === 'UID STORE COMPLETE') && affected && affected.length) {
+                    affected.forEach(function(message) {
+                        message = Array.isArray(message) ? message[1] : message;
+                        connection.selectedMailbox.HIGHESTMODSEQ = (connection.selectedMailbox.HIGHESTMODSEQ || 0) + 1;
+                        message.MODSEQ = connection.selectedMailbox.HIGHESTMODSEQ;
+                    });
+                }
+
+                // Add CONDSTORE info if (CONDSTORE) option was used
+                if (description === 'EXAMINE' || description === 'SELECT') {
+
+                    // (CONDSTORE) option was used, show notice
+                    if (connection.sessionCondstore) {
+                        if (response.attributes.slice(-1)[0].type !== 'TEXT') {
+                            response.attributes.push({
+                                type: 'TEXT',
+                                value: 'CONDSTORE is now enabled'
+                            });
+                        } else {
+                            response.attributes.slice(-1)[0].value += ', CONDSTORE is now enabled';
+                        }
+                    }
+
+                    // Send untagged info about highest modseq
+                    connection.sendResponse({
+                        tag: '*',
+                        command: 'OK',
+                        attributes: [{
+                            type: 'SECTION',
+                            section: [{
+                                    type: 'ATOM',
+                                    value: 'HIGHESTMODSEQ'
+                                },
+                                connection.selectedMailbox.HIGHESTMODSEQ || 0
+                            ]
+                        }]
+                    }, 'CONDSTORE INFO', parsed, data);
+                }
             });
         }
     };
@@ -3348,6 +4124,51 @@
         };
 
         return storeHandlers;
+    }
+
+    function hasCondstoreOption(attributes, parent, index) {
+        if (!attributes) {
+            return false;
+        }
+        var condstoreOption = false;
+        if (Array.isArray(attributes)) {
+            for (var i = attributes.length - 1; i >= 0; i--) {
+                if (attributes[i] && attributes[i].type === 'ATOM' && attributes[i].value.toUpperCase() === 'CONDSTORE') {
+                    attributes.splice(i, 1);
+                    condstoreOption = true;
+                    break;
+                }
+            }
+
+            // remove parameter if no other memebers were left
+            if (!attributes.length) {
+                parent.splice(index, 1);
+            }
+        }
+        return !!condstoreOption;
+    }
+
+    function getCondstoreValue(attributes, name, parent, index) {
+        if (!attributes) {
+            return false;
+        }
+        var condstoreValue = false;
+        if (Array.isArray(attributes)) {
+            for (var i = 0; i < attributes.length; i += 2) {
+                if (attributes[i] && attributes[i].type === 'ATOM' && attributes[i].value.toUpperCase() === name.toUpperCase()) {
+                    condstoreValue = attributes[i + 1];
+                    attributes.splice(i, 2);
+                    break;
+                }
+            }
+
+            // remove parameter if no other memebers were left
+            if (!attributes.length) {
+                parent.splice(index, 1);
+            }
+        }
+
+        return condstoreValue;
     }
 
     return BrowserCrow;

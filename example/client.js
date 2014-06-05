@@ -2,7 +2,7 @@
 
 var server = new BrowserCrow({
     debug: false,
-    plugins: ['sasl-ir', 'xoauth2', 'special-use', 'id'],
+    plugins: ['sasl-ir', 'xoauth2', 'special-use', 'id', 'idle', 'unselect', 'enable', 'condstore'],
     id: {
         name: 'browsercrow',
         version: '0.1.0'
@@ -15,7 +15,8 @@ var server = new BrowserCrow({
                 uid: 500
             }, {
                 raw: 'Subject: hello 2\r\n\r\nWorld 2!',
-                flags: ['\\Seen']
+                flags: ['\\Seen'],
+                uid: 600
             }, {
                 raw: 'Subject: hello 3\r\n\r\nWorld 3!'
             }, {
