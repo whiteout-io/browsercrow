@@ -2,7 +2,7 @@
     'use strict';
 
     if (typeof define === 'function' && define.amd) {
-        define(['utf7', 'imap-handler', 'mimefuncs', './mimeparser', './bodystructure', './envelope'], function(ImapClient, utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope) {
+        define(['utf7', 'imap-handler', 'mimefuncs', './mimeparser', './bodystructure', './envelope'], function(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope) {
             return factory(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope);
         });
     } else if (typeof exports === 'object') {
@@ -12,6 +12,8 @@
     }
 }(this, function(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope) {
     'use strict';
+
+    /* jshint indent:false */
 
     function BrowserCrow(options) {
         var _self = this;
@@ -61,9 +63,16 @@
                     break;
             }
         });
-
-        this.indexFolders();
     }
+
+    BrowserCrow.prototype.createTCPSocket = function(){
+        var _self = this;
+        return {
+            open: function(host, port, options) {
+                return _self.connect(options);
+            }
+        };
+    };
 
     BrowserCrow.prototype.indexFolders = function() {
         var _self = this;
@@ -361,6 +370,8 @@
         if (!('debug' in options)) {
             options.debug = !!this.options.debug;
         }
+
+        this.indexFolders();
 
         var connection = new CrowConnection(this, options);
         this.connections.push(connection);

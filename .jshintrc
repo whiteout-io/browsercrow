@@ -19,7 +19,30 @@
     "-W100": true,
 
     "globals": {
-        "define": false,
-        "BrowserCrow": false
+        "define": true,
+        "chrome": true,
+        "TextEncoder": true,
+        "TextDecoder": true,
+        "mimefuncs" : true,
+        "BrowserboxImapClient": true,
+        "utf7": true,
+        "imapHandler": true,
+        "mimetypes" : true,
+        "escape" : true,
+        "unescape" : true,
+        "punycode" : true,
+        "addressparser" : true,
+        "console": true,
+        "describe": true,
+        "it": true,
+        "beforeEach": true,
+        "afterEach": true,
+        "window": true,
+        "mocha": true,
+        "mochaPhantomJS": true,
+        "importScripts": true,
+        "postMessage": true,
+        "before": true,
+        "self": true
     }
 }

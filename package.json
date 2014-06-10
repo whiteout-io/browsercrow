@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "grunt"
   },
   "main": "src/browsercrow",
   "dependencies": {
@@ -12,6 +12,24 @@
     "imap-handler": "https://github.com/whiteout-io/imap-handler/tarball/master",
     "mimefuncs": "https://github.com/whiteout-io/mimefuncs/tarball/v0.3.1",
     "addressparser": "https://github.com/whiteout-io/addressparser/tarball/v0.1.2"
+  },
+  "devDependencies": {
+    "chai": "~1.8.1",
+    "grunt": "~0.4.1",
+    "grunt-mocha-phantomjs": "~0.4.0",
+    "grunt-contrib-connect": "~0.6.0",
+    "grunt-contrib-jshint": "~0.8.0",
+    "grunt-contrib-copy": "^0.5.0",
+    "grunt-contrib-clean": "^0.5.0",
+    "grunt-contrib-watch": "^0.6.1",
+    "mocha": "~1.16.2",
+    "phantomjs": "~1.9.7-1",
+    "requirejs": "~2.1.10",
+    "sinon": "^1.9.0",
+    "stringencoding": "https://github.com/whiteout-io/stringencoding/tarball/v0.1.0",
+    "browserbox": "https://github.com/whiteout-io/browserbox/tarball/master",
+    "amdefine": "^0.1.0",
+    "grunt-mocha-test": "^0.10.2"
   },
   "author": "Andris Reinman",
   "license": "MIT"
