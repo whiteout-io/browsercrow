@@ -859,7 +859,7 @@
             if (!query.section) {
                 throw new Error('BODY.PEEK requires ans argument list');
             }
-            return this.BODY(connection, message, query);
+            return connection.server.fetchHandlers.BODY(connection, message, query);
         },
 
         BODY: function(connection, message, query) {
