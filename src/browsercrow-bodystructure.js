@@ -2,7 +2,7 @@
     'use strict';
 
     if (typeof define === 'function' && define.amd) {
-        define(['./browsercrow-envelope', './browsercrow-mimeParser'], function(envelope, mimeParser) {
+        define(['./browsercrow-envelope', './browsercrow-mimeparser'], function(envelope, mimeParser) {
             return factory(envelope, mimeParser);
         });
     } else if (typeof exports === 'object') {
