@@ -673,6 +673,10 @@
     CrowConnection.prototype._processInput = function(str) {
         var match;
 
+        if (this.options.debug) {
+            console.log('CLIENT: %s', (str || '').trim());
+        }
+
         if (this._literalRemaining) {
             if (this._literalRemaining > str.length) {
                 this._literalRemaining -= str.length;
