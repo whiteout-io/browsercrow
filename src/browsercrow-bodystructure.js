@@ -2,11 +2,11 @@
     'use strict';
 
     if (typeof define === 'function' && define.amd) {
-        define(['./envelope', './mimeParser'], function(envelope, mimeParser) {
+        define(['./browsercrow-envelope', './browsercrow-mimeParser'], function(envelope, mimeParser) {
             return factory(envelope, mimeParser);
         });
     } else if (typeof exports === 'object') {
-        module.exports = factory(require('./envelope', './mimeparser'));
+        module.exports = factory(require('./browsercrow-envelope', './browsercrow-mimeparser'));
     } else {
         root.bodystructure = factory(root.envelope, root.mimeParser);
     }

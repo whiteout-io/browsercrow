@@ -2,11 +2,11 @@
     'use strict';
 
     if (typeof define === 'function' && define.amd) {
-        define(['utf7', 'imap-handler', 'mimefuncs', './mimeparser', './bodystructure', './envelope'], function(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope) {
+        define(['utf7', 'imap-handler', 'mimefuncs', './browsercrow-mimeparser', './browsercrow-bodystructure', './browsercrow-envelope'], function(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope) {
             return factory(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope);
         });
     } else if (typeof exports === 'object') {
-        module.exports = factory(require('utf7'), require('imap-handler'), require('mimefuncs'), require('./mimeparser'), require('./bodystructure'), require('./envelope'));
+        module.exports = factory(require('utf7'), require('imap-handler'), require('mimefuncs'), require('./browsercrow-mimeparser'), require('./browsercrow-bodystructure'), require('./browsercrow-envelope'));
     } else {
         root.BrowserCrow = factory(root.utf7, root.imapHandler, root.mimefuncs, root.mimeParser, root.bodystructure, root.envelope);
     }
