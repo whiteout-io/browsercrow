@@ -9,7 +9,7 @@
   "main": "src/browsercrow",
   "dependencies": {
     "utf7": "https://github.com/whiteout-io/utf7/tarball/v2.0.0",
-    "imap-handler": "https://github.com/whiteout-io/imap-handler/tarball/master",
+    "imap-handler": "https://github.com/whiteout-io/imap-handler/tarball/v0.1.10",
     "mimefuncs": "https://github.com/whiteout-io/mimefuncs/tarball/v0.3.1",
     "addressparser": "https://github.com/whiteout-io/addressparser/tarball/v0.1.2"
   },
@@ -27,7 +27,7 @@
     "requirejs": "~2.1.10",
     "sinon": "^1.9.0",
     "stringencoding": "https://github.com/whiteout-io/stringencoding/tarball/v0.1.0",
-    "browserbox": "https://github.com/whiteout-io/browserbox/tarball/master",
+    "browserbox": "https://github.com/whiteout-io/browserbox/tarball/v0.3.7",
     "amdefine": "^0.1.0",
     "grunt-mocha-test": "^0.10.2"
   },

@@ -42,7 +42,8 @@ module.exports = function(grunt) {
                     'imap-handler/src/*.js',
                     'mimefuncs/src/mimefuncs.js',
                     'addressparser/src/addressparser.js',
-                    'browserbox/src/*.js'
+                    'browserbox/src/*.js',
+                    'browserbox/node_modules/axe/axe.js'
                 ],
                 dest: 'test/lib/'
             },
