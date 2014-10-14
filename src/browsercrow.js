@@ -6,7 +6,7 @@
             return factory(utf7, imapHandler, mimefuncs, mimeParser, bodystructure, envelope);
         });
     } else if (typeof exports === 'object') {
-        module.exports = factory(require('utf7'), require('imap-handler'), require('mimefuncs'), require('./browsercrow-mimeparser'), require('./browsercrow-bodystructure'), require('./browsercrow-envelope'));
+        module.exports = factory(require('wo-utf7'), require('wo-imap-handler'), require('mimefuncs'), require('./browsercrow-mimeparser'), require('./browsercrow-bodystructure'), require('./browsercrow-envelope'));
     } else {
         root.BrowserCrow = factory(root.utf7, root.imapHandler, root.mimefuncs, root.mimeParser, root.bodystructure, root.envelope);
     }

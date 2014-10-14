@@ -6,7 +6,7 @@
             return factory(addressparser);
         });
     } else if (typeof exports === 'object') {
-        module.exports = factory(require('addressparser'));
+        module.exports = factory(require('wo-addressparser'));
     } else {
         root.mimeParser = factory(root.addressparser);
     }
