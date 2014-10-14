@@ -37,13 +37,13 @@ module.exports = function(grunt) {
                     'chai/chai.js',
                     'sinon/pkg/sinon.js',
                     'requirejs/require.js',
-                    'stringencoding/dist/stringencoding.js',
-                    'utf7/src/utf7.js',
-                    'imap-handler/src/*.js',
+                    'wo-stringencoding/dist/stringencoding.js',
+                    'wo-utf7/src/utf7.js',
+                    'wo-imap-handler/src/*.js',
                     'mimefuncs/src/mimefuncs.js',
-                    'addressparser/src/addressparser.js',
+                    'wo-addressparser/src/addressparser.js',
                     'browserbox/src/*.js',
-                    'browserbox/node_modules/axe/axe.js'
+                    'browserbox/node_modules/axe-logger/axe.js'
                 ],
                 dest: 'test/lib/'
             },
